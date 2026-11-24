@@ -2,7 +2,7 @@
 
 Application web d'ISA Conseils (Mali – Guinée) : présentation du cabinet, fiches de renseignement, personnel, partenaires et références professionnelles.
 
-**Site :** https://dolo01.github.io/ISAconseils_presentation_references/
+Hébergement : **Netlify**. Base de données : **Neon** (PostgreSQL).
 
 ## Fonctionnalités
 
@@ -10,19 +10,33 @@ Application web d'ISA Conseils (Mali – Guinée) : présentation du cabinet, fi
 - Logos des projets et bailleurs de fonds
 - Références professionnelles, avec recherche et filtres par catégorie, pays et financement
 - Impression et export Word de chaque onglet
+- Espace administrateur : les modifications sont enregistrées en ligne et visibles immédiatement par tous
+
+## Organisation des fichiers
+
+| Fichier | Rôle |
+|---|---|
+| `public/index.html` | Le site (contenu initial intégré, remplacé par la version en ligne dès qu'elle existe) |
+| `netlify/functions/api.mjs` | Le serveur (API) qui lit et écrit dans Neon |
+| `netlify.toml` | Configuration Netlify |
+
+## Mise en place (une seule fois)
+
+1. **Neon** : créez un projet sur https://neon.tech et copiez la *connection string*.
+2. **Netlify** : *Add new site → Import an existing project → GitHub*, puis choisissez ce dépôt. Laissez les réglages proposés.
+3. Dans Netlify, ouvrez *Site configuration → Environment variables* et ajoutez :
+   - `DATABASE_URL` : la connection string Neon
+   - `ADMIN_INITIAL_PASSWORD` : un mot de passe pour le premier compte `admin`
+4. Relancez le déploiement (*Deploys → Trigger deploy*).
+
+Les tables sont créées automatiquement au premier appel.
 
 ## Espace administrateur
 
-Ajoutez `#admin` à la fin de l'adresse :
-https://dolo01.github.io/ISAconseils_presentation_references/#admin
+Ajoutez `#admin` à la fin de l'adresse du site.
 
-Changez le mot de passe par défaut dès la première connexion.
-
-Les modifications enregistrées restent dans le navigateur de l'administrateur. Pour les publier sur le site :
-
-1. Connectez-vous avec `#admin`, faites vos modifications, puis cliquez sur **Enregistrer**.
-2. Cliquez sur **Application à jour**. Un fichier HTML se télécharge.
-3. Renommez ce fichier en `index.html`.
-4. Sur GitHub, cliquez sur **Add file → Upload files**, déposez le fichier, puis cliquez sur **Commit changes**.
-
-Le site se met à jour en une à deux minutes.
+- **Première connexion** : identifiant `admin` et le mot de passe `ADMIN_INITIAL_PASSWORD`. Le site demande ensuite d'en choisir un nouveau.
+- Les autres administrateurs se créent dans le menu **Administrateurs**. Les comptes fonctionnent depuis n'importe quel ordinateur.
+- **Enregistrer** publie immédiatement les modifications pour tous les visiteurs.
+- Si deux administrateurs modifient en même temps, le site prévient avant d'écraser quoi que ce soit.
+- **Exporter** permet de télécharger une sauvegarde des données (fichier `.json`), et **Importer** de la restaurer.

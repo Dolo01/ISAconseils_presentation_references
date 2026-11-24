@@ -1,0 +1,8 @@
+{
+  "name": "isa-conseils-site",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2"
+  }
+}

@@ -254,7 +254,6 @@ body.admin .only-public{display:none}
     <button class="btn p" id="bSave"><i data-ic="save"></i><span class="lbl">Enregistrer</span></button>
     <button class="btn" id="bExport"><i data-ic="down"></i><span class="lbl">Exporter</span></button>
     <button class="btn" id="bImport"><i data-ic="up"></i><span class="lbl">Importer</span></button>
-    <button class="btn" id="bDownloadApp"><i data-ic="box"></i><span class="lbl">Application à jour</span></button>
     <button class="btn" id="bAdmins"><i data-ic="users"></i><span class="lbl">Administrateurs</span></button>
     <button class="btn" id="bLogout"><i data-ic="logout"></i><span class="lbl">Déconnexion</span></button>
   </div>
@@ -293,10 +292,10 @@ body.admin .only-public{display:none}
 <script>
 (function(){
 "use strict";
-const SHELL = document.documentElement.outerHTML; // captured before rendering, used to rebuild a standalone copy
 const EMBEDDED = JSON.parse(document.getElementById('appData').textContent);
 const LOGO = JSON.parse(document.getElementById('appLogo').textContent).logo;
-const DB_NAME='isa-conseils-app', STORE='kv';
+const API='/api';
+let token=null, me=null, serverAt=null, apiOk=false;
 let data = clone(EMBEDDED);
 let tab = 'pres', admin=false, dirty=false;
 let filt = {q:'',pays:'',fin:'',cat:''};
@@ -345,17 +344,28 @@ function setDirty(v){dirty=v;$('#dirty').textContent=v?'● Modifications non en
 function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')}
 function uid(){return 'x'+Math.random().toString(36).slice(2,9)}
 
-/* ---------- storage (IndexedDB, falls back to memory) ---------- */
-function idb(){return new Promise((res,rej)=>{try{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>r.result.createObjectStore(STORE);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)}catch(e){rej(e)}})}
-async function kvGet(k){try{const db=await idb();return await new Promise((res,rej)=>{const q=db.transaction(STORE).objectStore(STORE).get(k);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)})}catch(e){return undefined}}
-async function kvSet(k,v){const db=await idb();return new Promise((res,rej)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).put(v,k);t.oncomplete=()=>res();t.onerror=()=>rej(t.error)})}
-
-/* ---------- admin accounts ---------- */
-async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
-async function getAdmins(){
-  let a=await kvGet('admins');
-  if(!a||!a.length){a=[{user:'admin',hash:await sha('admin:ISA2026'),mustChange:true}];await kvSet('admins',a).catch(()=>{})}
-  return a;
+/* ---------- API (Netlify + Neon) ---------- */
+function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function lsSet(k,v){try{v==null?localStorage.removeItem(k):localStorage.setItem(k,v)}catch(e){}}
+async function api(path,opt={}){
+  const h={'content-type':'application/json'};if(token)h.authorization='Bearer '+token;
+  let r;
+  try{r=await fetch(API+path,{method:opt.method||'GET',headers:h,body:opt.body?JSON.stringify(opt.body):undefined,cache:'no-store'})}
+  catch(e){const x=new Error('Serveur injoignable. Vérifiez votre connexion internet.');x.status=0;throw x}
+  let j={};try{j=await r.json()}catch(e){}
+  if(r.status===401&&token&&path!=='/login'){token=null;me=null;lsSet('isa-token',null);if(admin){admin=false;render();toast('Session expirée, reconnectez-vous')}}
+  if(!r.ok){const x=new Error(j.error||('Erreur '+r.status));x.status=r.status;x.body=j;throw x}
+  return j;
+}
+async function loadRemote(){
+  try{
+    const j=await api('/data'+(serverAt?'?since='+encodeURIComponent(serverAt):''));
+    apiOk=true;
+    if(j.unchanged)return false;
+    serverAt=j.updatedAt||null;
+    if(j.data){data=j.data;return true}
+  }catch(e){apiOk=false}
+  return false;
 }
 
 /* ---------- rendering ---------- */
@@ -625,69 +635,86 @@ function catModal(ci){
   });
 }
 async function loginModal(){
+  if(document.querySelector('.modal'))return;
   modal(`<form><h2>Connexion administrateur</h2>
     <div class="field"><label>Identifiant</label><input name="u" autocomplete="username" required></div>
     <div class="field"><label>Mot de passe</label><input name="p" type="password" autocomplete="current-password" required></div>
     <div class="err"></div>
     <div class="acts"><button type="button" class="btn" data-close>Annuler</button><button class="btn p">Se connecter</button></div></form>`,
   async bg=>{
-    const f=bg.querySelector('form'),u=f.elements.u.value.trim().toLowerCase(),p=f.elements.p.value;
-    const admins=await getAdmins();const h=await sha(u+':'+p);
-    const a=admins.find(x=>x.user===u&&x.hash===h);
-    if(!a){bg.querySelector('.err').textContent='Identifiant ou mot de passe incorrect.';return false}
-    admin=true;sessionStorageSet('isa-admin',u);render();toast('Connecté en tant que '+u);
-    if(a.mustChange)setTimeout(()=>pwdModal(u,true),300);
+    const f=bg.querySelector('form'),err=bg.querySelector('.err'),btn=f.querySelector('.btn.p');
+    btn.disabled=true;err.textContent='';
+    try{
+      const j=await api('/login',{method:'POST',body:{user:f.elements.u.value.trim().toLowerCase(),password:f.elements.p.value}});
+      token=j.token;me=j.user;lsSet('isa-token',token);admin=true;
+      await loadRemote();render();toast('Connecté en tant que '+me);
+      if(j.mustChange)setTimeout(()=>pwdModal(true),300);
+    }catch(e){
+      err.textContent=(e.status===404||e.status===405||(e.status===0&&location.protocol==='file:'))?'L\'espace administrateur fonctionne uniquement sur le site en ligne (Netlify).':e.message;
+      btn.disabled=false;return false;
+    }
   });
 }
-function sessionStorageSet(k,v){try{v==null?sessionStorage.removeItem(k):sessionStorage.setItem(k,v)}catch(e){}}
-function sessionStorageGet(k){try{return sessionStorage.getItem(k)}catch(e){return null}}
-function pwdModal(user,forced){
-  modal(`<form><h2>${forced?'Choisissez un nouveau mot de passe':'Changer le mot de passe'}</h2>
-    ${forced?'<p class="hint">Vous utilisez le mot de passe par défaut. Remplacez-le maintenant.</p>':''}
+function pwdModal(forced){
+  modal(`<form><h2>${forced?'Choisissez un nouveau mot de passe':'Changer mon mot de passe'}</h2>
+    ${forced?'<p class="hint">Vous utilisez le mot de passe initial. Remplacez-le maintenant.</p>':''}
     <div class="field"><label>Nouveau mot de passe (8 caractères minimum)</label><input name="p1" type="password" autocomplete="new-password" required minlength="8"></div>
     <div class="field"><label>Confirmer</label><input name="p2" type="password" autocomplete="new-password" required></div>
     <div class="err"></div>
     <div class="acts"><button type="button" class="btn" data-close>Plus tard</button><button class="btn p">Valider</button></div></form>`,
   async bg=>{
-    const f=bg.querySelector('form');
-    if(f.elements.p1.value!==f.elements.p2.value){bg.querySelector('.err').textContent='Les deux mots de passe sont différents.';return false}
-    const admins=await getAdmins();const a=admins.find(x=>x.user===user);
-    a.hash=await sha(user+':'+f.elements.p1.value);a.mustChange=false;await kvSet('admins',admins);toast('Mot de passe modifié');
+    const f=bg.querySelector('form'),err=bg.querySelector('.err');
+    if(f.elements.p1.value!==f.elements.p2.value){err.textContent='Les deux mots de passe sont différents.';return false}
+    try{await api('/password',{method:'POST',body:{password:f.elements.p1.value}});toast('Mot de passe modifié')}
+    catch(e){err.textContent=e.message;return false}
   });
 }
 async function adminsModal(){
-  const admins=await getAdmins();const me=sessionStorageGet('isa-admin');
+  let list;
+  try{list=await api('/admins')}catch(e){alert(e.message);return}
   const bg=modal(`<h2>Administrateurs</h2>
     <table><thead><tr><th>Identifiant</th><th></th></tr></thead><tbody>
-    ${admins.map(a=>`<tr><td>${esc(a.user)}${a.user===me?' <span class="badge">vous</span>':''}</td><td><div class="acts">
-      ${a.user===me?`<button class="btn sm" data-pw="${esc(a.user)}">Changer mon mot de passe</button>`:`<button class="btn sm d" data-del="${esc(a.user)}">Supprimer</button>`}</div></td></tr>`).join('')}
+    ${list.admins.map(a=>`<tr><td>${esc(a)}${a===list.me?' <span class="badge">vous</span>':''}</td><td><div class="acts">
+      ${a===list.me?`<button class="btn sm" data-pw="1">Changer mon mot de passe</button>`:`<button class="btn sm d" data-del="${esc(a)}">Supprimer</button>`}</div></td></tr>`).join('')}
     </tbody></table>
     <form style="margin-top:16px"><h3>Ajouter un administrateur</h3>
-      <div class="field"><label>Identifiant</label><input name="u" required pattern="[A-Za-z0-9._-]+" title="Lettres, chiffres, . _ -"></div>
+      <div class="field"><label>Identifiant</label><input name="u" required pattern="[A-Za-z0-9._\-]{2,40}" title="Lettres, chiffres, . _ -"></div>
       <div class="field"><label>Mot de passe (8 caractères minimum)</label><input name="p" type="password" required minlength="8" autocomplete="new-password"></div>
       <div class="err"></div>
       <div class="acts"><button type="button" class="btn" data-close>Fermer</button><button class="btn p">Ajouter</button></div></form>
-    <p class="hint">Les comptes sont propres à ce navigateur/ordinateur.</p>`,
+    <p class="hint">Les comptes sont communs à tous les ordinateurs : chaque administrateur se connecte de partout avec son identifiant.</p>`,
   async bg=>{
-    const f=bg.querySelector('form');const u=f.elements.u.value.trim().toLowerCase();
-    const list=await getAdmins();
-    if(list.some(x=>x.user===u)){bg.querySelector('.err').textContent='Cet identifiant existe déjà.';return false}
-    list.push({user:u,hash:await sha(u+':'+f.elements.p.value),mustChange:false});await kvSet('admins',list);toast('Administrateur ajouté');
-    setTimeout(adminsModal,50);
+    const f=bg.querySelector('form');
+    try{await api('/admins',{method:'POST',body:{user:f.elements.u.value.trim().toLowerCase(),password:f.elements.p.value}})}
+    catch(e){bg.querySelector('.err').textContent=e.message;return false}
+    toast('Administrateur ajouté');setTimeout(adminsModal,50);
   });
   bg.querySelectorAll('[data-del]').forEach(x=>x.addEventListener('click',async()=>{
     if(!confirm('Supprimer l\'administrateur '+x.dataset.del+' ?'))return;
-    const list=(await getAdmins()).filter(a=>a.user!==x.dataset.del);await kvSet('admins',list);bg.remove();adminsModal();}));
-  bg.querySelectorAll('[data-pw]').forEach(x=>x.addEventListener('click',()=>{bg.remove();pwdModal(x.dataset.pw,false)}));
+    try{await api('/admins/'+encodeURIComponent(x.dataset.del),{method:'DELETE'})}catch(e){alert(e.message);return}
+    bg.remove();adminsModal();}));
+  bg.querySelectorAll('[data-pw]').forEach(x=>x.addEventListener('click',()=>{bg.remove();pwdModal(false)}));
 }
 
 /* ---------- save / export / import ---------- */
-async function save(){
+let saving=false;
+async function save(force){
+  if(!admin||saving)return;
+  saving=true;const b=$('#bSave');b.disabled=true;
   try{
     data.savedAt=new Date().toISOString();
-    await kvSet('data',data);setDirty(false);toast('Modifications enregistrées ✔');
+    const j=await api('/data',{method:'PUT',body:{data,baseUpdatedAt:serverAt,force:!!force}});
+    serverAt=j.updatedAt;setDirty(false);toast('Enregistré en ligne ✔ Visible par tous les visiteurs');
     if(tab==='pres')render();
-  }catch(e){alert('Échec de l\'enregistrement : '+e.message+'\nUtilisez « Exporter les données » pour ne rien perdre.')}
+  }catch(e){
+    if(e.status===409){
+      const who=e.body.updatedBy||'un autre administrateur';
+      saving=false;b.disabled=false;
+      if(confirm(`Attention : ${who} a enregistré des modifications le ${fmtDate(e.body.updatedAt)}, après l'ouverture de votre page.\n\nOK : remplacer par VOS modifications\nAnnuler : garder SA version (la vôtre sera téléchargée en fichier de secours)`))return save(true);
+      exportJSON();setDirty(false);serverAt=null;await loadRemote();render();toast('Version en ligne rechargée');return;
+    }
+    if(e.status!==401)alert('Échec de l\'enregistrement : '+e.message+'\n\nVos modifications sont toujours à l\'écran. Réessayez, ou utilisez « Exporter » pour les garder dans un fichier.');
+  }finally{saving=false;b.disabled=false}
 }
 function download(name,content,type){
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;document.body.appendChild(a);a.click();
@@ -704,13 +731,6 @@ function importJSON(file){
     data=d;setDirty(true);render();toast('Données importées — cliquez sur Enregistrer pour les conserver');
   }catch(e){alert('Import impossible : '+e.message)}};
   r.readAsText(file);
-}
-function downloadApp(){
-  const d=clone(data);d.savedAt=d.savedAt||new Date().toISOString();
-  const json=JSON.stringify(d).replace(/</g,'\\u003c');
-  const html='<!doctype html>\n'+SHELL.replace(/(<script id="appData" type="application\/json">)[\s\S]*?(<\/script>)/,(_,a,b)=>a+json+b);
-  download(`ISA-Conseils-application-${stamp()}.html`,html,'text/html');
-  toast('Copie de l\'application téléchargée avec les données actuelles');
 }
 function addLogos(files){
   const list=[...files];let n=0;
@@ -748,24 +768,26 @@ function exportWord(){
 async function init(){
   $('#logoTop').src=LOGO;
   document.querySelectorAll('i[data-ic]').forEach(i=>i.outerHTML=ic(i.dataset.ic));
-  const saved=await kvGet('data');
-  if(saved&&saved.presentation&&(!EMBEDDED.savedAt||(saved.savedAt||'')>=EMBEDDED.savedAt))data=saved;
-  if(sessionStorageGet('isa-admin'))admin=true;
+  render();
+  token=lsGet('isa-token');
+  if(token){try{me=(await api('/me')).user;admin=true}catch(e){token=null;lsSet('isa-token',null)}}
+  if(await loadRemote()||admin)render();
   document.querySelectorAll('#tabs button').forEach(b=>b.addEventListener('click',()=>{tab=b.dataset.tab;render();window.scrollTo({top:0})}));
   $('#bLogin').addEventListener('click',loginModal);
   const showLogin=()=>{const on=/^#admin$/i.test(location.hash);$('#bLogin').hidden=!on;if(on&&!admin)loginModal()};
   window.addEventListener('hashchange',showLogin);showLogin();
-  $('#bLogout').addEventListener('click',()=>{if(dirty&&!confirm('Des modifications ne sont pas enregistrées. Se déconnecter quand même ?'))return;admin=false;sessionStorageSet('isa-admin',null);render()});
-  $('#bSave').addEventListener('click',save);
+  $('#bLogout').addEventListener('click',async()=>{if(dirty&&!confirm('Des modifications ne sont pas enregistrées. Se déconnecter quand même ?'))return;
+    try{await api('/logout',{method:'POST'})}catch(e){}
+    token=null;me=null;lsSet('isa-token',null);admin=false;setDirty(false);await loadRemote();render()});
+  $('#bSave').addEventListener('click',()=>save(false));
   $('#bExport').addEventListener('click',exportJSON);
   $('#bImport').addEventListener('click',()=>$('#fileImport').click());
   $('#fileImport').addEventListener('change',e=>{if(e.target.files[0])importJSON(e.target.files[0]);e.target.value=''});
   $('#fileLogo').addEventListener('change',e=>{if(e.target.files.length)addLogos(e.target.files);e.target.value=''});
-  $('#bDownloadApp').addEventListener('click',downloadApp);
   $('#bAdmins').addEventListener('click',adminsModal);
   $('#bPrint').addEventListener('click',doPrint);
   $('#bWord').addEventListener('click',exportWord);
-  window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&admin){e.preventDefault();save()}});
+  window.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&admin){e.preventDefault();save(false)}});
   window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
   render();
 }
